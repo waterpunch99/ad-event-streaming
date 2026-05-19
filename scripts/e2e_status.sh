@@ -12,6 +12,27 @@ compose_exec() {
   docker compose exec -T "$@"
 }
 
+clickhouse_final_suffix() {
+  local table_name="$1"
+  local engine
+  engine="$(compose_exec clickhouse clickhouse-client --database ad_pipeline --query "
+SELECT engine
+FROM system.tables
+WHERE database = currentDatabase()
+  AND name = '$table_name'
+FORMAT TabSeparated
+" 2>/dev/null || true)"
+
+  case "$engine" in
+    ReplacingMergeTree|SummingMergeTree|AggregatingMergeTree|CollapsingMergeTree)
+      printf ' FINAL'
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
 log "Docker Compose services"
 docker compose ps
 
@@ -35,8 +56,9 @@ SELECT 'silver_late_events', COUNT(*) FROM silver_late_events;
 "
 
 log "ClickHouse Gold row counts"
+MINUTELY_FINAL_SUFFIX="$(clickhouse_final_suffix gold_campaign_metrics_minutely)"
 compose_exec clickhouse clickhouse-client --database ad_pipeline --query "
-SELECT 'gold_campaign_metrics_minutely' AS table_name, count() FROM gold_campaign_metrics_minutely
+SELECT 'gold_campaign_metrics_minutely' AS table_name, count() FROM gold_campaign_metrics_minutely${MINUTELY_FINAL_SUFFIX}
 UNION ALL
 SELECT 'gold_campaign_metrics_hourly', count() FROM gold_campaign_metrics_hourly
 UNION ALL

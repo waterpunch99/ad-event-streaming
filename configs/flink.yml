@@ -6,3 +6,19 @@ taskmanager:
   slots: 4
 
 checkpoint_dir: file:///opt/flink/checkpoints
+checkpoint_interval_ms: 60000
+checkpoint_min_pause_ms: 10000
+checkpoint_timeout_ms: 300000
+checkpoint_max_concurrent: 1
+checkpoint_mode: EXACTLY_ONCE
+
+restart_strategy:
+  type: fixed-delay
+  attempts: 3
+  delay_ms: 10000
+
+parallelism: 1
+
+dedup_state_ttl:
+  event_id_hours: 24
+  conversion_id_hours: 168

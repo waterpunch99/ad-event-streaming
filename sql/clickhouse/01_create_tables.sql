@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS gold_campaign_metrics_minutely (
     cost Decimal(18, 6),
     revenue Decimal(18, 6),
     roas Float64,
-    updated_at DateTime DEFAULT now()
+    updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY metric_date
 ORDER BY (campaign_id, advertiser_id, window_start);
 

@@ -3,6 +3,9 @@ CREATE TABLE IF NOT EXISTS bronze_ad_events (
     event_id TEXT,
     raw_payload JSONB NOT NULL,
     source_file TEXT,
+    source_line_number INTEGER,
+    collector_run_id TEXT,
+    kafka_key TEXT,
     kafka_topic TEXT DEFAULT 'ad-events-raw',
     kafka_partition INTEGER,
     kafka_offset BIGINT,
@@ -22,6 +25,12 @@ CREATE INDEX IF NOT EXISTS idx_bronze_ad_events_campaign_id
 
 CREATE INDEX IF NOT EXISTS idx_bronze_ad_events_user_id
     ON bronze_ad_events ((raw_payload ->> 'user_id'));
+
+CREATE INDEX IF NOT EXISTS idx_bronze_ad_events_collector_run_id
+    ON bronze_ad_events (collector_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_bronze_ad_events_source_position
+    ON bronze_ad_events (source_file, source_line_number);
 
 CREATE TABLE IF NOT EXISTS silver_ad_events (
     id BIGSERIAL PRIMARY KEY,

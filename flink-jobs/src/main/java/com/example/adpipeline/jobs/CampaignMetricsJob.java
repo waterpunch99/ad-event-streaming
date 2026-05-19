@@ -7,9 +7,9 @@ import com.example.adpipeline.model.CampaignMetric;
 import com.example.adpipeline.serde.AdEventDeserializationSchema;
 import com.example.adpipeline.serde.CampaignMetricSerializationSchema;
 import com.example.adpipeline.sink.ClickHouseSinkFactory;
+import com.example.adpipeline.util.FlinkJobConfig;
 import com.example.adpipeline.util.TimeUtils;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
@@ -38,7 +38,7 @@ public final class CampaignMetricsJob {
         boolean publishRealtimeTopic = params.getBoolean("publish-realtime-topic", true);
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.enableCheckpointing(Duration.ofMinutes(1).toMillis());
+        FlinkJobConfig.apply(env, params);
 
         KafkaSource<AdEvent> source = KafkaSource.<AdEvent>builder()
             .setBootstrapServers(bootstrapServers)

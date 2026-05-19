@@ -10,8 +10,8 @@ import com.example.adpipeline.model.LateEvent;
 import com.example.adpipeline.serde.EventEnvelopeKeySerializationSchema;
 import com.example.adpipeline.serde.EventEnvelopeSerializationSchema;
 import com.example.adpipeline.sink.PostgresSinkFactory;
+import com.example.adpipeline.util.FlinkJobConfig;
 import com.example.adpipeline.util.TimeUtils;
-import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.java.utils.ParameterTool;
@@ -45,9 +45,11 @@ public final class CleanAdEventsJob {
         String postgresUrl = params.get("postgres-url", "jdbc:postgresql://postgres:5432/ad_pipeline");
         String postgresUser = params.get("postgres-user", "postgres");
         String postgresPassword = params.get("postgres-password", "postgres");
+        long eventIdDedupTtlHours = params.getLong("event-id-dedup-ttl-hours", 24);
+        long conversionIdDedupTtlHours = params.getLong("conversion-id-dedup-ttl-hours", 24 * 7);
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.enableCheckpointing(Duration.ofMinutes(1).toMillis());
+        FlinkJobConfig.apply(env, params);
 
         KafkaSource<String> source = KafkaSource.<String>builder()
             .setBootstrapServers(bootstrapServers)
@@ -78,14 +80,18 @@ public final class CleanAdEventsJob {
 
         SingleOutputStreamOperator<EventEnvelope> eventIdUniqueEvents = nonLateEvents
             .keyBy(EventEnvelope::eventId)
-            .process(new EventDeduplicator(EventDeduplicator.EVENT_ID_KEY, DUPLICATE_EVENTS))
+            .process(new EventDeduplicator(EventDeduplicator.EVENT_ID_KEY, DUPLICATE_EVENTS, eventIdDedupTtlHours))
             .name("deduplicate-by-event-id");
 
         DataStream<DuplicateEvent> eventIdDuplicates = eventIdUniqueEvents.getSideOutput(DUPLICATE_EVENTS);
 
         SingleOutputStreamOperator<EventEnvelope> cleanEvents = eventIdUniqueEvents
             .keyBy(EventEnvelope::conversionDedupKey)
-            .process(new EventDeduplicator(EventDeduplicator.CONVERSION_ID_KEY, DUPLICATE_EVENTS))
+            .process(new EventDeduplicator(
+                EventDeduplicator.CONVERSION_ID_KEY,
+                DUPLICATE_EVENTS,
+                conversionIdDedupTtlHours
+            ))
             .name("deduplicate-by-conversion-id");
 
         DataStream<DuplicateEvent> conversionDuplicates = cleanEvents.getSideOutput(DUPLICATE_EVENTS);

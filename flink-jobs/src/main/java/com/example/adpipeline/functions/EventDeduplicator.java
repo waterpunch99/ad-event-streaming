@@ -4,6 +4,8 @@ import com.example.adpipeline.model.DuplicateEvent;
 import com.example.adpipeline.model.EventEnvelope;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.util.Collector;
@@ -15,16 +17,28 @@ public class EventDeduplicator extends KeyedProcessFunction<String, EventEnvelop
 
     private final String duplicateKeyType;
     private final OutputTag<DuplicateEvent> duplicateEventTag;
+    private final long ttlHours;
     private transient ValueState<Boolean> seen;
 
-    public EventDeduplicator(String duplicateKeyType, OutputTag<DuplicateEvent> duplicateEventTag) {
+    public EventDeduplicator(String duplicateKeyType, OutputTag<DuplicateEvent> duplicateEventTag, long ttlHours) {
         this.duplicateKeyType = duplicateKeyType;
         this.duplicateEventTag = duplicateEventTag;
+        this.ttlHours = ttlHours;
     }
 
     @Override
     public void open(Configuration parameters) {
-        seen = getRuntimeContext().getState(new ValueStateDescriptor<>("seen-" + duplicateKeyType, Boolean.class));
+        ValueStateDescriptor<Boolean> descriptor =
+            new ValueStateDescriptor<>("seen-" + duplicateKeyType, Boolean.class);
+        descriptor.enableTimeToLive(
+            StateTtlConfig
+                .newBuilder(Time.hours(ttlHours))
+                .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+                .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+                .cleanupInRocksdbCompactFilter(1000)
+                .build()
+        );
+        seen = getRuntimeContext().getState(descriptor);
     }
 
     @Override

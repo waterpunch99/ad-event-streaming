@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 
 DEFAULT_LANDING_DIR = Path("data/landing")
@@ -19,6 +21,7 @@ DEFAULT_ARCHIVE_DIR = Path("data/archive")
 DEFAULT_BAD_DIR = Path("data/bad")
 DEFAULT_BOOTSTRAP_SERVERS = "localhost:9092"
 DEFAULT_RAW_TOPIC = "ad-events-raw"
+DEFAULT_POSTGRES_DSN = "postgresql://postgres:postgres@localhost:5433/ad_pipeline"
 
 
 class Producer(Protocol):
@@ -32,12 +35,33 @@ class Producer(Protocol):
         ...
 
 
+class BronzeWriter(Protocol):
+    def insert_ad_event(
+        self,
+        *,
+        payload: dict[str, Any],
+        source_file: str,
+        source_line_number: int,
+        collector_run_id: str,
+        kafka_key: str,
+        kafka_topic: str,
+        kafka_partition: int | None,
+        kafka_offset: int | None,
+    ) -> None:
+        ...
+
+    def close(self) -> Any:
+        ...
+
+
 @dataclass(frozen=True)
 class CollectorResult:
     processed_files: int
     archived_files: int
     sent_records: int
     bad_records: int
+    bronze_records: int
+    collector_run_id: str
 
 
 def collect_landing_files(
@@ -47,16 +71,30 @@ def collect_landing_files(
     bootstrap_servers: str = DEFAULT_BOOTSTRAP_SERVERS,
     raw_topic: str = DEFAULT_RAW_TOPIC,
     dry_run: bool = False,
+    enable_bronze: bool = False,
+    postgres_dsn: str | None = None,
+    producer: Producer | None = None,
+    bronze_writer: BronzeWriter | None = None,
+    collector_run_id: str | None = None,
 ) -> CollectorResult:
     landing_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
     bad_dir.mkdir(parents=True, exist_ok=True)
 
-    producer = None if dry_run else _create_kafka_producer(bootstrap_servers)
+    collector_run_id = collector_run_id or _new_collector_run_id()
+    owns_producer = producer is None
+    owns_bronze_writer = bronze_writer is None
+
+    if not dry_run and producer is None:
+        producer = _create_kafka_producer(bootstrap_servers)
+    if enable_bronze and not dry_run and bronze_writer is None:
+        bronze_writer = _create_bronze_writer(postgres_dsn or _default_postgres_dsn())
+
     processed_files = 0
     archived_files = 0
     sent_records = 0
     bad_records = 0
+    bronze_records = 0
 
     try:
         for input_path in sorted(landing_dir.glob("*.jsonl")):
@@ -66,22 +104,29 @@ def collect_landing_files(
                 archive_dir=archive_dir,
                 bad_dir=bad_dir,
                 producer=producer,
+                bronze_writer=bronze_writer,
                 raw_topic=raw_topic,
                 dry_run=dry_run,
+                collector_run_id=collector_run_id,
             )
             archived_files += 1
             sent_records += file_result.sent_records
             bad_records += file_result.bad_records
+            bronze_records += file_result.bronze_records
     finally:
-        if producer is not None:
+        if producer is not None and owns_producer:
             producer.flush()
             producer.close()
+        if bronze_writer is not None and owns_bronze_writer:
+            bronze_writer.close()
 
     return CollectorResult(
         processed_files=processed_files,
         archived_files=archived_files,
         sent_records=sent_records,
         bad_records=bad_records,
+        bronze_records=bronze_records,
+        collector_run_id=collector_run_id,
     )
 
 
@@ -92,6 +137,16 @@ def main() -> None:
     parser.add_argument("--bad-dir", type=Path, default=DEFAULT_BAD_DIR)
     parser.add_argument("--bootstrap-servers", default=DEFAULT_BOOTSTRAP_SERVERS)
     parser.add_argument("--raw-topic", default=DEFAULT_RAW_TOPIC)
+    parser.add_argument(
+        "--enable-bronze",
+        action="store_true",
+        help="Write successfully published events to PostgreSQL bronze_ad_events.",
+    )
+    parser.add_argument(
+        "--postgres-dsn",
+        default=None,
+        help="PostgreSQL DSN for Bronze writes. Defaults to POSTGRES_DSN or local Docker host DSN.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -106,13 +161,17 @@ def main() -> None:
         bootstrap_servers=args.bootstrap_servers,
         raw_topic=args.raw_topic,
         dry_run=args.dry_run,
+        enable_bronze=args.enable_bronze,
+        postgres_dsn=args.postgres_dsn,
     )
     print(
         "collector finished: "
         f"processed_files={result.processed_files}, "
         f"archived_files={result.archived_files}, "
         f"sent_records={result.sent_records}, "
-        f"bad_records={result.bad_records}"
+        f"bad_records={result.bad_records}, "
+        f"bronze_records={result.bronze_records}, "
+        f"collector_run_id={result.collector_run_id}"
     )
 
 
@@ -120,6 +179,7 @@ def main() -> None:
 class _FileResult:
     sent_records: int
     bad_records: int
+    bronze_records: int
 
 
 def _process_file(
@@ -127,10 +187,13 @@ def _process_file(
     archive_dir: Path,
     bad_dir: Path,
     producer: Producer | None,
+    bronze_writer: BronzeWriter | None,
     raw_topic: str,
     dry_run: bool,
+    collector_run_id: str,
 ) -> _FileResult:
     sent_records = 0
+    bronze_records = 0
     bad_records: list[dict[str, Any]] = []
 
     with input_path.open("r", encoding="utf-8") as file:
@@ -156,11 +219,25 @@ def _process_file(
             if not dry_run:
                 if producer is None:
                     raise RuntimeError("producer is required unless dry_run is enabled")
-                producer.send(
+                send_future = producer.send(
                     raw_topic,
                     key=user_id.encode("utf-8"),
                     value=stripped_line.encode("utf-8"),
                 )
+                metadata = _wait_for_send_metadata(send_future)
+
+                if bronze_writer is not None:
+                    bronze_writer.insert_ad_event(
+                        payload=payload,
+                        source_file=input_path.name,
+                        source_line_number=line_number,
+                        collector_run_id=collector_run_id,
+                        kafka_key=user_id,
+                        kafka_topic=getattr(metadata, "topic", raw_topic),
+                        kafka_partition=getattr(metadata, "partition", None),
+                        kafka_offset=getattr(metadata, "offset", None),
+                    )
+                    bronze_records += 1
 
             sent_records += 1
 
@@ -170,7 +247,11 @@ def _process_file(
     archive_path = _unique_path(archive_dir / input_path.name)
     shutil.move(str(input_path), archive_path)
 
-    return _FileResult(sent_records=sent_records, bad_records=len(bad_records))
+    return _FileResult(
+        sent_records=sent_records,
+        bad_records=len(bad_records),
+        bronze_records=bronze_records,
+    )
 
 
 def _create_kafka_producer(bootstrap_servers: str) -> Producer:
@@ -188,6 +269,27 @@ def _create_kafka_producer(bootstrap_servers: str) -> Producer:
         retries=3,
         linger_ms=10,
     )
+
+
+def _create_bronze_writer(postgres_dsn: str) -> BronzeWriter:
+    from src.storage.postgres import PostgresBronzeWriter
+
+    return PostgresBronzeWriter(postgres_dsn)
+
+
+def _wait_for_send_metadata(send_future: Any) -> Any:
+    if hasattr(send_future, "get"):
+        return send_future.get(timeout=30)
+    return send_future
+
+
+def _default_postgres_dsn() -> str:
+    return os.getenv("POSTGRES_DSN", DEFAULT_POSTGRES_DSN)
+
+
+def _new_collector_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"collector-{timestamp}-{uuid4().hex[:8]}"
 
 
 def _extract_user_id(payload: Any) -> str:

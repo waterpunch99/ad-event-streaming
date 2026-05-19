@@ -225,6 +225,31 @@ services:
     networks:
       - ad_pipeline_net
 
+  python-runner:
+    build:
+      context: .
+      dockerfile: docker/python/Dockerfile
+    image: ad-pipeline-python:local
+    profiles:
+      - tools
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+    volumes:
+      - .:/app
+    networks:
+      - ad_pipeline_net
+
+  maven-runner:
+    image: maven:3.9-eclipse-temurin-17
+    profiles:
+      - tools
+    working_dir: /workspace
+    volumes:
+      - ./flink-jobs:/workspace
+    networks:
+      - ad_pipeline_net
+
 networks:
   ad_pipeline_net:
     name: ad_pipeline_net

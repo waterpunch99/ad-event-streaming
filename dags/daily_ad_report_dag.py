@@ -35,6 +35,38 @@ def execute_clickhouse(sql: str) -> None:
         response.read()
 
 
+def query_clickhouse_text(sql: str) -> str:
+    query = urlencode(
+        {
+            "database": CLICKHOUSE_DATABASE,
+            "user": CLICKHOUSE_USER,
+            "password": CLICKHOUSE_PASSWORD,
+        }
+    )
+    request = Request(
+        url=f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_HTTP_PORT}/?{query}",
+        data=sql.encode("utf-8"),
+        method="POST",
+    )
+    with urlopen(request, timeout=60) as response:
+        return response.read().decode("utf-8").strip()
+
+
+def minutely_metrics_table_expr() -> str:
+    engine = query_clickhouse_text(
+        """
+        SELECT engine
+        FROM system.tables
+        WHERE database = currentDatabase()
+          AND name = 'gold_campaign_metrics_minutely'
+        FORMAT TabSeparated
+        """
+    )
+    if engine in {"ReplacingMergeTree", "SummingMergeTree", "AggregatingMergeTree", "CollapsingMergeTree"}:
+        return "gold_campaign_metrics_minutely FINAL"
+    return "gold_campaign_metrics_minutely"
+
+
 def target_metric_date() -> str:
     context = get_current_context()
     dag_run = context.get("dag_run")
@@ -55,6 +87,7 @@ def daily_ad_report_dag():
     @task
     def build_hourly_campaign_metrics() -> None:
         metric_date = target_metric_date()
+        minutely_table = minutely_metrics_table_expr()
         execute_clickhouse(
             f"""
             ALTER TABLE gold_campaign_metrics_hourly
@@ -103,7 +136,7 @@ def daily_ad_report_dag():
                     sum(conversions) AS conversions,
                     sum(cost) AS cost,
                     sum(revenue) AS revenue
-                FROM gold_campaign_metrics_minutely
+                FROM {minutely_table}
                 WHERE metric_date = toDate('{metric_date}')
                 GROUP BY
                     hour_start,

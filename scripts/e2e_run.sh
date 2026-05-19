@@ -5,6 +5,11 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EVENT_COUNT="${EVENT_COUNT:-1000}"
 EVENT_SEED="${EVENT_SEED:-42}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
+METRIC_DATE="${METRIC_DATE:-$(date -u '+%Y-%m-%d')}"
+AUTO_CANCEL_FLINK_JOBS="${AUTO_CANCEL_FLINK_JOBS:-1}"
+CLEAN_JOB_ARGS="${CLEAN_JOB_ARGS:-}"
+METRICS_JOB_ARGS="${METRICS_JOB_ARGS:-}"
+POSTGRES_DSN="${POSTGRES_DSN:-postgresql://postgres:postgres@postgres:5432/ad_pipeline}"
 FLINK_JAR="$PROJECT_ROOT/flink-jobs/target/ad-realtime-data-pipeline-flink-jobs-0.1.0.jar"
 FLINK_CONTAINER_JAR="/opt/flink/usrlib/ad-pipeline/target/ad-realtime-data-pipeline-flink-jobs-0.1.0.jar"
 
@@ -23,6 +28,31 @@ require_command() {
 
 compose_exec() {
   docker compose exec -T "$@"
+}
+
+compose_run() {
+  docker compose run --rm "$@"
+}
+
+clickhouse_final_suffix() {
+  local table_name="$1"
+  local engine
+  engine="$(compose_exec clickhouse clickhouse-client --database ad_pipeline --query "
+SELECT engine
+FROM system.tables
+WHERE database = currentDatabase()
+  AND name = '$table_name'
+FORMAT TabSeparated
+" 2>/dev/null || true)"
+
+  case "$engine" in
+    ReplacingMergeTree|SummingMergeTree|AggregatingMergeTree|CollapsingMergeTree)
+      printf ' FINAL'
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
 }
 
 wait_for_compose_service() {
@@ -53,7 +83,6 @@ wait_for_compose_service() {
 }
 
 require_command docker
-require_command python3
 
 if [[ ! -f .env ]]; then
   log "Creating .env from .env.example"
@@ -80,46 +109,53 @@ compose_exec postgres psql -U postgres -d ad_pipeline -c "\\dt"
 log "Checking ClickHouse tables"
 compose_exec clickhouse clickhouse-client --database ad_pipeline --query "SHOW TABLES"
 
-log "Building Flink jobs with Maven"
-if command -v mvn >/dev/null 2>&1; then
-  mvn -f flink-jobs/pom.xml package
-else
-  docker run --rm \
-    -v "$PROJECT_ROOT/flink-jobs:/workspace" \
-    -w /workspace \
-    maven:3.9-eclipse-temurin-17 \
-    mvn package
-fi
+log "Building Python runner image"
+docker compose build python-runner
+
+log "Building Flink jobs with Docker Maven"
+compose_run maven-runner mvn package
 
 if [[ ! -f "$FLINK_JAR" ]]; then
   printf 'Flink job jar was not created: %s\n' "$FLINK_JAR" >&2
   exit 1
 fi
 
+if [[ "$AUTO_CANCEL_FLINK_JOBS" == "1" ]]; then
+  log "Cancelling existing Flink pipeline jobs before submission"
+  ./scripts/flink_cancel_jobs.sh
+fi
+
 log "Submitting CleanAdEventsJob"
 compose_exec flink-jobmanager flink run -d \
   -c com.example.adpipeline.jobs.CleanAdEventsJob \
-  "$FLINK_CONTAINER_JAR"
+  "$FLINK_CONTAINER_JAR" \
+  $CLEAN_JOB_ARGS
 
 log "Submitting CampaignMetricsJob"
 compose_exec flink-jobmanager flink run -d \
   -c com.example.adpipeline.jobs.CampaignMetricsJob \
-  "$FLINK_CONTAINER_JAR"
+  "$FLINK_CONTAINER_JAR" \
+  $METRICS_JOB_ARGS
 
 log "Generating JSONL ad events"
-python3 -m src.generator.event_generator \
+compose_run python-runner python -m src.generator.event_generator \
   --count "$EVENT_COUNT" \
   --seed "$EVENT_SEED"
 
 log "Collecting JSONL logs into Kafka ad-events-raw"
-python3 -m src.collector.log_collector
+compose_run python-runner python -m src.collector.log_collector \
+  --bootstrap-servers kafka:29092 \
+  --enable-bronze \
+  --postgres-dsn "$POSTGRES_DSN"
 
 log "Waiting for streaming jobs to process records"
 sleep "$WAIT_SECONDS"
 
-log "Checking PostgreSQL Silver row counts"
+log "Checking PostgreSQL Bronze/Silver row counts"
 compose_exec postgres psql -U postgres -d ad_pipeline -c "
-SELECT 'silver_ad_events' AS table_name, COUNT(*) FROM silver_ad_events
+SELECT 'bronze_ad_events' AS table_name, COUNT(*) FROM bronze_ad_events
+UNION ALL
+SELECT 'silver_ad_events', COUNT(*) FROM silver_ad_events
 UNION ALL
 SELECT 'silver_invalid_events', COUNT(*) FROM silver_invalid_events
 UNION ALL
@@ -129,6 +165,7 @@ SELECT 'silver_late_events', COUNT(*) FROM silver_late_events;
 "
 
 log "Checking ClickHouse minutely campaign metrics"
+MINUTELY_FINAL_SUFFIX="$(clickhouse_final_suffix gold_campaign_metrics_minutely)"
 compose_exec clickhouse clickhouse-client --database ad_pipeline --query "
 SELECT
   campaign_id,
@@ -139,14 +176,17 @@ SELECT
   round(avg(ctr), 4) AS avg_ctr,
   round(avg(cvr), 4) AS avg_cvr,
   round(avg(roas), 4) AS avg_roas
-FROM gold_campaign_metrics_minutely
+FROM gold_campaign_metrics_minutely${MINUTELY_FINAL_SUFFIX}
 GROUP BY campaign_id, advertiser_id
 ORDER BY impressions DESC
 LIMIT 10;
 "
 
-log "Triggering Airflow daily_ad_report_dag"
-compose_exec airflow-scheduler airflow dags trigger daily_ad_report_dag
+log "Triggering Airflow daily_ad_report_dag for metric_date=${METRIC_DATE}"
+compose_exec airflow-scheduler airflow dags unpause daily_ad_report_dag
+compose_exec airflow-scheduler airflow dags trigger daily_ad_report_dag \
+  -c "{\"metric_date\":\"${METRIC_DATE}\"}" \
+  -r "manual_metric_date_${METRIC_DATE//-/_}_$(date -u '+%Y%m%d%H%M%S')"
 
 log "Waiting for Airflow batch DAG"
 sleep "$WAIT_SECONDS"
