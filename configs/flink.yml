@@ -1,0 +1,8 @@
+jobmanager:
+  host: flink-jobmanager
+  web_ui: http://localhost:8081
+
+taskmanager:
+  slots: 4
+
+checkpoint_dir: file:///opt/flink/checkpoints

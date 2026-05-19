@@ -1,0 +1,8 @@
+host:
+  internal: clickhouse
+  external: localhost
+http_port: 8123
+native_port: 9000
+database: ad_pipeline
+user: default
+password: ""

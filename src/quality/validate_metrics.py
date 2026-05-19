@@ -1,0 +1,1 @@
+"""Metric quality validation placeholder."""

@@ -1,0 +1,10 @@
+project_name: ad-realtime-data-pipeline
+
+paths:
+  landing: data/landing
+  archive: data/archive
+  bad: data/bad
+  checkpoints: data/checkpoints
+
+watermark:
+  allowed_lateness_minutes: 10

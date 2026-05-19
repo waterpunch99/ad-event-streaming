@@ -1,0 +1,1 @@
+"""Event quality validation placeholder."""

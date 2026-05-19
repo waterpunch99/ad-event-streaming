@@ -1,0 +1,10 @@
+host:
+  internal: postgres
+  external: localhost
+port: 5432
+external_port: 5433
+database: ad_pipeline
+user: postgres
+password: postgres
+
+airflow_database: airflow

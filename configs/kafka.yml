@@ -1,0 +1,12 @@
+bootstrap_servers:
+  internal: kafka:29092
+  external: localhost:9092
+
+topics:
+  raw: ad-events-raw
+  invalid: ad-events-invalid
+  deduplicated: ad-events-deduplicated
+  clean: ad-events-clean
+  realtime_metrics: ad-metrics-realtime
+
+partition_key: user_id

@@ -1,0 +1,3 @@
+/workspace/src/test/java/com/example/adpipeline/functions/CampaignMetricAggregatorTest.java
+/workspace/src/test/java/com/example/adpipeline/serde/AdEventDeserializationSchemaTest.java
+/workspace/src/test/java/com/example/adpipeline/validation/EventValidatorTest.java

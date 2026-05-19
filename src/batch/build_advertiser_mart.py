@@ -1,0 +1,1 @@
+"""Advertiser mart batch placeholder."""
