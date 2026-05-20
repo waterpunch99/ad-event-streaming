@@ -15,6 +15,7 @@ import com.example.adpipeline.util.TimeUtils;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -114,6 +115,8 @@ public final class CleanAdEventsJob {
     private static KafkaSink<EventEnvelope> cleanKafkaSink(String bootstrapServers, String cleanTopic) {
         return KafkaSink.<EventEnvelope>builder()
             .setBootstrapServers(bootstrapServers)
+            .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+            .setTransactionalIdPrefix("clean-ad-events-job")
             .setRecordSerializer(
                 KafkaRecordSerializationSchema.<EventEnvelope>builder()
                     .setTopic(cleanTopic)

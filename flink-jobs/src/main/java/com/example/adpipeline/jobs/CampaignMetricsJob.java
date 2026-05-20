@@ -12,6 +12,7 @@ import com.example.adpipeline.util.TimeUtils;
 import java.nio.charset.StandardCharsets;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -74,6 +75,8 @@ public final class CampaignMetricsJob {
     private static KafkaSink<CampaignMetric> realtimeMetricSink(String bootstrapServers, String topic) {
         return KafkaSink.<CampaignMetric>builder()
             .setBootstrapServers(bootstrapServers)
+            .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+            .setTransactionalIdPrefix("campaign-metrics-job")
             .setRecordSerializer(
                 KafkaRecordSerializationSchema.<CampaignMetric>builder()
                     .setTopic(topic)
